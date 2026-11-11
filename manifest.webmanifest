@@ -1,0 +1,11 @@
+{
+  "name": "Face scan",
+  "short_name": "Face scan",
+  "description": "Live face tracking with a blue scan mesh.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#020812",
+  "theme_color": "#020812",
+  "icons": [{"src": "icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}]
+}

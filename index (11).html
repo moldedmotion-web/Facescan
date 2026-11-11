@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#020812">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Face scan</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;700&display=swap" rel="stylesheet">
+<style>
+:root{--ink:#020812;--blue:#2bb6ff;--glow:#0a8cff;--ice:#d8f4ff}
+*{box-sizing:border-box;margin:0}
+[hidden]{display:none!important}
+html,body{height:100%;background:var(--ink);color:var(--ice);font-family:"Chakra Petch",system-ui,sans-serif;overflow:hidden}
+body{display:grid;place-items:center;height:100dvh}
+#stage{position:relative;--ar:.75;width:min(100vw,calc(100dvh*var(--ar)));aspect-ratio:var(--ar);background:#000;overflow:hidden}
+#stage video,#stage canvas{position:absolute;inset:0;width:100%;height:100%}
+.mirror video,.mirror canvas{transform:scaleX(-1)}
+#intro{position:fixed;inset:0;z-index:5;display:grid;place-content:center;justify-items:center;gap:16px;text-align:center;padding:28px;background:radial-gradient(circle at 50% 35%,#0a2a52 0,var(--ink) 65%)}
+h1{font-size:44px;font-weight:700;letter-spacing:-.01em;text-shadow:0 0 28px var(--glow)}
+#intro p{max-width:26ch;line-height:1.5;color:#8fc6e6}
+.btn{font:inherit;font-weight:700;font-size:17px;color:var(--ice);padding:15px 34px;border-radius:999px;border:1.5px solid var(--blue);background:#0a8cff26;box-shadow:0 0 26px #0a8cff66,inset 0 0 14px #2bb6ff33;cursor:pointer;transition:transform .12s}
+.btn:active{transform:scale(.95)}
+.btn:disabled{opacity:.6}
+.btn:focus-visible{outline:2px solid var(--ice);outline-offset:3px}
+#err{min-height:1.4em;max-width:30ch;color:#ff9aa8;font-size:14px}
+#hud{position:fixed;top:0;left:0;right:0;z-index:3;display:flex;justify-content:center;padding:calc(env(safe-area-inset-top,0px) + 14px) 16px 0;pointer-events:none}
+#status{display:flex;align-items:center;gap:9px;font-weight:500;font-size:14px;padding:8px 16px;border-radius:999px;border:1px solid #2bb6ff55;background:#020812b8;transition:border-color .2s,box-shadow .2s}
+#status::before{content:"";width:8px;height:8px;border-radius:50%;background:#3a6a8c}
+#status.on{border-color:var(--blue);box-shadow:0 0 18px #0a8cff88}
+#status.on::before{background:var(--blue);box-shadow:0 0 8px var(--blue)}
+#flip{position:fixed;z-index:3;left:50%;transform:translateX(-50%);bottom:calc(env(safe-area-inset-bottom,0px) + 24px);font-size:15px;padding:12px 24px}
+@media (prefers-reduced-motion:reduce){.btn{transition:none}}
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="v" playsinline muted></video>
+  <canvas id="c"></canvas>
+</div>
+
+<div id="hud" hidden><div id="status">Looking for a face…</div></div>
+<button id="flip" class="btn" hidden>Flip camera</button>
+
+<section id="intro">
+  <h1>Face scan</h1>
+  <p>Point the camera at a face. Tracking runs on your device and video is never uploaded.</p>
+  <button id="go" class="btn">Start scanning</button>
+  <small id="err" role="alert"></small>
+</section>
+
+<script type="module">
+import {FaceLandmarker,FilesetResolver,DrawingUtils} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+const $=s=>document.querySelector(s);
+const stage=$('#stage'),video=$('#v'),cv=$('#c'),ctx=cv.getContext('2d'),st=$('#status'),go=$('#go'),err=$('#err');
+// landmark indices tracing the outline of the face, used to clip the scan sweep
+const OVAL=[10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,378,400,377,152,148,176,149,150,136,172,58,132,93,234,127,162,21,54,103,67,109];
+let fl,du,stream,res,last=-1,shown='',facing='user';
+
+async function loadModel(){
+  const fs=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  const make=d=>FaceLandmarker.createFromOptions(fs,{
+    baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",delegate:d},
+    runningMode:"VIDEO",numFaces:2
+  });
+  try{return await make("GPU")}catch{return await make("CPU")}
+}
+
+async function cam(){
+  stream?.getTracks().forEach(t=>t.stop());
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:facing,width:{ideal:1280},height:{ideal:720}},audio:false});
+  video.srcObject=stream;
+  await video.play();
+  cv.width=video.videoWidth;cv.height=video.videoHeight;
+  stage.style.setProperty('--ar',cv.width/cv.height);
+  stage.classList.toggle('mirror',facing==='user');
+  last=-1;res=null;
+}
+
+function draw(p,now,u,w,h){
+  let x0=1,y0=1,x1=0,y1=0;
+  for(const q of p){if(q.x<x0)x0=q.x;if(q.x>x1)x1=q.x;if(q.y<y0)y0=q.y;if(q.y>y1)y1=q.y}
+  x0*=w;x1*=w;y0*=h;y1*=h;
+  const T=FaceLandmarker.FACE_LANDMARKS_TESSELATION;
+
+  // 1. the full mesh, thin and blue
+  du.drawConnectors(p,T,{color:'rgba(43,182,255,.4)',lineWidth:.8*u});
+  ctx.fillStyle='rgba(170,230,255,.75)';ctx.beginPath();
+  for(const q of p){ctx.moveTo(q.x*w+1.1*u,q.y*h);ctx.arc(q.x*w,q.y*h,1.1*u,0,6.283)}
+  ctx.fill();
+
+  // 2. glowing contours: eyes, brows, lips, jaw, irises
+  ctx.shadowColor='#0a8cff';ctx.shadowBlur=12*u;
+  du.drawConnectors(p,FaceLandmarker.FACE_LANDMARKS_CONTOURS,{color:'#7fdcff',lineWidth:1.8*u});
+  du.drawConnectors(p,FaceLandmarker.FACE_LANDMARKS_LEFT_IRIS,{color:'#fff',lineWidth:1.6*u});
+  du.drawConnectors(p,FaceLandmarker.FACE_LANDMARKS_RIGHT_IRIS,{color:'#fff',lineWidth:1.6*u});
+  ctx.shadowBlur=0;
+
+  // 3. scan sweep, clipped to the face: trailing glow, bright mesh at the beam, beam line
+  const H=y1-y0,ys=y0+H*((now/1900)%1),tr=H*.35;
+  ctx.save();
+  ctx.beginPath();OVAL.forEach((i,k)=>ctx[k?'lineTo':'moveTo'](p[i].x*w,p[i].y*h));ctx.closePath();ctx.clip();
+  const g=ctx.createLinearGradient(0,ys-tr,0,ys);
+  g.addColorStop(0,'rgba(10,140,255,0)');g.addColorStop(1,'rgba(40,190,255,.38)');
+  ctx.fillStyle=g;ctx.fillRect(x0,ys-tr,x1-x0,tr);
+  ctx.save();
+  ctx.beginPath();ctx.rect(x0,ys-H*.12,x1-x0,H*.15);ctx.clip();
+  du.drawConnectors(p,T,{color:'#e6f8ff',lineWidth:1.3*u});
+  ctx.restore();
+  ctx.shadowColor='#2bb6ff';ctx.shadowBlur=16*u;ctx.strokeStyle='#d8f4ff';ctx.lineWidth=2*u;
+  ctx.beginPath();ctx.moveTo(x0,ys);ctx.lineTo(x1,ys);ctx.stroke();
+  ctx.restore();
+
+  // 4. lock-on corner brackets
+  const pad=.06*(x1-x0),a=x0-pad,b=y0-pad,c=x1+pad,d=y1+pad,L=.22*(c-a);
+  ctx.strokeStyle='#2bb6ff';ctx.lineWidth=3*u;ctx.lineCap='round';ctx.lineJoin='round';
+  ctx.shadowColor='#0a8cff';ctx.shadowBlur=10*u;
+  ctx.beginPath();
+  [[a,b,1,1],[c,b,-1,1],[a,d,1,-1],[c,d,-1,-1]].forEach(([X,Y,sx,sy])=>{ctx.moveTo(X+sx*L,Y);ctx.lineTo(X,Y);ctx.lineTo(X,Y+sy*L)});
+  ctx.stroke();ctx.shadowBlur=0;
+}
+
+function loop(now){
+  requestAnimationFrame(loop);
+  if(video.readyState<2)return;
+  const w=cv.width,h=cv.height;
+  ctx.clearRect(0,0,w,h);
+  if(video.currentTime!==last){last=video.currentTime;res=fl.detectForVideo(video,now)}
+  const faces=res?.faceLandmarks||[];
+  const msg=faces.length>1?faces.length+' faces locked':faces.length?'Face locked':'Looking for a face…';
+  if(msg!==shown){shown=msg;st.textContent=msg;st.classList.toggle('on',faces.length>0)}
+  const u=w/640;
+  for(const p of faces)draw(p,now,u,w,h);
+}
+
+go.onclick=async()=>{
+  go.disabled=true;go.textContent='Loading tracker…';err.textContent='';
+  try{
+    fl=await loadModel();du=new DrawingUtils(ctx);
+    await cam();
+    $('#intro').hidden=true;$('#hud').hidden=false;$('#flip').hidden=false;
+    requestAnimationFrame(loop);
+  }catch(e){
+    go.disabled=false;go.textContent='Try again';
+    err.textContent=e.name==='NotAllowedError'?'Camera access is blocked. Allow it in your browser settings, then try again.':'Could not start: '+(e.message||e.name);
+  }
+};
+
+$('#flip').onclick=async()=>{
+  const prev=facing;facing=facing==='user'?'environment':'user';
+  try{await cam()}catch{facing=prev;await cam().catch(()=>{})}
+};
+</script>
+</body>
+</html>
